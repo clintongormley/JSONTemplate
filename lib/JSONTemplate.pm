@@ -3,6 +3,10 @@ package JSONTemplate;
 use strict;
 use warnings;
 use JSON::XS qw(encode_json decode_json);
+use JSON();
+use JSON::PP();
+use URI::Escape();
+use HTML::Entities();
 
 our %Funcs = (
     "array" => sub {
@@ -11,32 +15,55 @@ our %Funcs = (
     },
     "flatten" => sub {
         my $params = shift;
-        return map { ref $_ eq 'ARRAY' ? @$_ : $_ } @_
+        return map { ref $_ eq 'ARRAY' ? @$_ : $_ } @_;
+    },
+    "html" => sub {
+        my $params = shift;
+        return map { HTML::Entities::encode_entities( $_, '<>&"' ) } @_;
+    },
+    "join" => sub {
+        my $char = shift()->[0] || '';
+        no warnings 'uninitialized';
+        return join $char, map { _var_to_str($_) } grep {defined} @_;
     },
     "quote" => sub {
         my $params = shift;
         return map { '"' . $_ . '"' } @_;
     },
-    "join" => sub {
-        my $char = shift()->[0] || '';
-        return unless @_;
-        no warnings 'uninitialized';
-        return join $char, map {
-            ( ref($_) eq 'ARRAY' || ref($_) eq 'HASH' )
-                ? encode_json($_)
-                : $_
-        } @_;
-    },
     "json" => sub {
         my $params = shift;
         return map { decode_json($_) } @_;
     },
+    "lower" => sub {
+        my $params = shift;
+        return map { lc $_ } @_;
+    },
     "string" => sub {
         my $params = shift;
-        return map { ref $_ ? encode_json($_) : $_ } @_;
+        return _var_to_str(@_);
+    },
+    "upper" => sub {
+        my $params = shift;
+        return map { uc $_ } @_;
+    },
+    "uri" => sub {
+        my $params = shift;
+        return map { URI::Escape::uri_escape $_ } @_;
     }
-
 );
+
+#===================================
+sub _var_to_str {
+#===================================
+    return
+          @_ == 0                 ? ()
+        : @_ > 1                  ? encode_json( \@_ )
+        : !defined $_[0]          ? 'null'
+        : !ref $_[0]              ? shift()
+        : !JSON::is_bool( $_[0] ) ? encode_json( shift() )
+        : $_[0]                   ? 'true'
+        :                           'false';
+}
 
 #===================================
 sub new {
@@ -70,6 +97,16 @@ my %Escape = (
     "\\" => '\\'
 );
 
+my %Unescape = (
+    "b"  => "\b",
+    "f"  => "\f",
+    "n"  => "\n",
+    "r"  => "\r",
+    "t"  => "\t",
+    '"'  => '"',
+    "\\" => '\\'
+);
+
 #===================================
 sub render_json {
 #===================================
@@ -80,8 +117,8 @@ sub render_json {
     }
     if ( $self->_has_opaque ) {
         no warnings 'uninitialized';
-        my $val = join "", @output;
-        $val =~ s/([^\w])/$Escape{$1}||$1/ge;
+        my $val = join "", map { _var_to_str($_) } @output;
+        $val =~ s/(\\\\|[\b\f\n\r\t"\\])/$Escape{$1}||$1/ge;
         return '"' . $val . '"';
     }
     if ( @output > 1 ) {
@@ -90,6 +127,9 @@ sub render_json {
 
     my $val = $output[0];
     if ( ref $val ) {
+        if ( JSON::is_bool($val) ) {
+            return $val ? 'true' : 'false';
+        }
         return encode_json($val);
     }
     if ( !defined $val ) {
@@ -98,7 +138,8 @@ sub render_json {
     if ( $val =~ /^\d+(?:\.\d+)?$/ ) {
         return $val;
     }
-    $val =~ s/([^\w])/$Escape{$1}||$1/ge;
+    $val =~ s/(\\\\|[\b\f\n\r\t"\\])/$Escape{$1}||$1/ge;
+    utf8::encode($val);
     return '"' . $val . '"';
 }
 
@@ -112,7 +153,7 @@ sub render_text {
     }
     if ( $self->_has_opaque ) {
         no warnings 'uninitialized';
-        return join "", @output;
+        return join "", map { ref $_ ? encode_json($_) : $_ } @output;
     }
     if ( @output > 1 ) {
         return encode_json( \@output );
@@ -120,6 +161,9 @@ sub render_text {
 
     my $val = $output[0];
     if ( ref $val ) {
+        if ( JSON::is_bool($val) ) {
+            return $val ? 'true' : 'false';
+        }
         return encode_json($val);
     }
     if ( !defined $val ) {
@@ -144,39 +188,38 @@ sub _execute {
             next;
         }
 
-        if ( $type eq 'VAL' ) {
-            push @output, $self->_apply_functions($item);
-            next;
+        if ( $type eq 'CLOSE_PAREN' || $type eq 'CLOSE_SECTION' ) {
+            $self->_replace_token($token);
+            return @output;
         }
 
-        if ( $type eq 'VAR' ) {
-            my $val = $self->_lookup_var($item);
-            push @output, $self->_apply_functions($val);
-            next;
+        my @vals
+            = $type eq 'VAL'          ? $item
+            : $type eq 'VAR'          ? $self->_lookup_var($item)
+            : $type eq 'OPEN_PAREN'   ? $self->_execute
+            : $type eq 'OPEN_SECTION' ? $self->_execute_section($item)
+            :                           die "Unknown token <$type>";
+
+        # drop CLOSE_PAREN/CLOSE_SECTION
+        if ($type eq 'OPEN_PAREN' || $type eq 'OPEN_SECTION') {
+            $self->_next_token;
         }
 
-        if ( $type eq 'CONCAT' ) {
+        @vals = $self->_apply_functions(@vals);
+
+        $token = $self->_peek_next_token;
+        if ( $token && $token->[0] eq 'CONCAT' ) {
+            $self->_next_token;
             my @next = $self->_execute;
             no warnings 'uninitialized';
-            if (@output) {
-                $output[-1] = $output[-1] . shift(@next);
+            if ( @vals == 1 && @next == 1 ) {
+                $vals[-1] = $vals[-1] . shift(@next);
             }
-            push @output, @next;
-            next;
+            else {
+                push @vals, @next;
+            }
         }
-
-        if ( $type eq 'OPEN_PAREN' ) {
-            push @output, $self->_apply_functions( $self->_execute );
-            next;
-        }
-
-        if ( $type eq 'OPEN_SECTION' ) {
-            push @output,
-                $self->_apply_functions( $self->_execute_section($item) );
-            next;
-        }
-
-        return @output;
+        push @output, @vals;
 
     }
 
@@ -193,7 +236,7 @@ sub _apply_functions {
         last unless $token->[0] eq 'FUNC';
         $token = $self->_next_token;
         my $func = $Funcs{ $token->[1] }
-            or die "Unknown function name: " . $token->[1];
+            or die "Unknown function name: " . $token->[1] . "\n";
         my @params;
         my $next = $self->_peek_next_token;
         if ( $next && $next->[0] eq 'OPEN_PARAM' ) {
@@ -210,7 +253,7 @@ sub _apply_functions {
                     push @params, $val;
                     next;
                 }
-                die "Unknown token: " . $token->[0];
+                die "Unknown token: " . $token->[0] . "\n";
             }
         }
         @vals = $func->( \@params, @vals );
@@ -291,7 +334,7 @@ sub _lookup_var {
             next;
         }
         if ( ref $params eq 'ARRAY' ) {
-            die "Cannot access array with key <$part>"
+            die "Cannot access array with key <$part>\n"
                 unless $part =~ /^-?\d+/;
             $params = $params->[$part];
             next;
@@ -377,7 +420,9 @@ sub _tokenize {
                 next;
             }
 
-                   $self->_number
+                   $self->_bool
+                || $self->_null
+                || $self->_number
                 || $self->_double_quoted_string
                 || $self->_single_quoted_string
                 || $self->_var
@@ -437,7 +482,7 @@ sub _tokenize {
             : $stack[-1] eq 'PARAM' ? ')'
             :                         "UNHANDLED STACK ITEM";
         my $input = $self->_original;
-        die "Missing closing $missing marked by <HERE>: $input <HERE>\n";
+        die "Missing closing $missing:\n$input \x{2B05}\n";
     }
 
 }
@@ -469,10 +514,10 @@ sub _check_stack {
 
         $msg = "Got closing $got but was expecting $expected_msg. ";
     }
-    die "$msg Marked by <-- HERE: "
+    die "$msg:\n"
         . substr( $self->_original, 0, $self->_get_offset )
-        . '" <-- HERE "'
-        . substr( $self->_original, $self->_get_offset );
+        . " \x{2B05} "
+        . substr( $self->_original, $self->_get_offset ) . "\n";
 }
 
 #===================================
@@ -584,13 +629,29 @@ sub _comma {
 }
 
 #===================================
+sub _bool {
+#===================================
+    my $self = shift;
+    return unless $self->_input =~ /^(true|false)\b/;
+    my $val = $1 eq 'true' ? JSON::PP::true() : JSON::PP::false();
+    $self->_add_token( 'VAL', $val, length($1) );
+    return 1;
+}
+
+#===================================
+sub _null {
+#===================================
+    my $self = shift;
+    return unless $self->_input =~ /^(null)\b/;
+    $self->_add_token( 'VAL', undef, length($1) );
+    return 1;
+}
+
+#===================================
 sub _number {
 #===================================
     my $self = shift;
-    if ( $self->_input =~ /^(\d+\.\d+)/ ) {
-        $self->_add_token( 'VAL', $1 );
-    }
-    elsif ( $self->_input =~ /^(\d+)/ ) {
+    if ( $self->_input =~ /^(\d+(?:\.\d+)?)/ ) {
         $self->_add_token( 'VAL', $1 );
     }
     else {
@@ -631,10 +692,11 @@ sub _double_quoted_string {
 #===================================
     my $self = shift;
 
-    # TODO: Handle unescaping of strings - single quoted too?
     return unless $self->_input =~ /^"((?:\\"|[^"])*)"/;
+    my $orig = my $str = $1;
+    $str =~ s/\\([bfnrt"\\])/$Unescape{$1}/ge;
     $self->_skip_token('"');
-    $self->_add_token( 'VAL', $1 );
+    $self->_add_token( 'VAL', $str, length $orig );
     $self->_skip_token('"');
     return 1;
 }
@@ -654,19 +716,21 @@ sub _single_quoted_string {
 #===================================
 sub _add_token {
 #===================================
-    my $self  = shift;
-    my $type  = shift;
-    my $token = shift;
-    push @{ $self->{_tokens} }, [ $type, $token, $self->_get_offset ];
-    $self->_add_offset( length $token );
+    my $self   = shift;
+    my $type   = shift;
+    my $token  = shift;
+    my $length = shift || length $token;
+    push @{ $self->{_tokens} }, [ $type, $token ];
+    $self->_add_offset($length);
 }
 
 #===================================
 sub _skip_token {
 #===================================
-    my $self  = shift;
-    my $token = shift;
-    $self->_add_offset( length $token );
+    my $self   = shift;
+    my $token  = shift;
+    my $length = shift || length $token;
+    $self->_add_offset($length);
 }
 
 #===================================
@@ -681,9 +745,9 @@ sub _unknown_token {
     my $offset = $self->_get_offset;
     my $exception
         = substr( $input, 0, $offset )
-        . " HERE --> "
+        . " \x{27A1} "
         . substr( $input, $offset );
-    die "Syntax error marked by HERE --> : $exception\n$expected";
+    die "Syntax error:\n$exception\n$expected\n";
 }
 
 #===================================
@@ -743,6 +807,13 @@ sub _next_token {
 #===================================
     my $self = shift;
     shift @{ $self->{_tokens} };
+}
+
+#===================================
+sub _replace_token {
+#===================================
+    my $self = shift;
+    unshift @{ $self->_tokens }, shift();
 }
 
 #===================================
