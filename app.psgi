@@ -36,8 +36,9 @@ sub render {
     my ( $result, $error );
     eval { $result = $J->render_json( $template, $params ); 1 }
         or $error = $@;
-    utf8::encode($error);
+
     if ($error) {
+        utf8::encode($error);
         return [ 400, [ 'Content-Type', 'text/plain' ], [$error] ];
     }
 
