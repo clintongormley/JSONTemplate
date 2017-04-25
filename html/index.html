@@ -1,0 +1,60 @@
+<html>
+<head>
+<meta charset="UTF-8">
+<link rel="stylesheet" type="text/css" href="styles.css">
+<script src="https://code.jquery.com/jquery-3.2.1.min.js"></script>
+<script src="autosize-master/dist/autosize.min.js"></script>
+<script
+  src=" https://cdn.rawgit.com/showdownjs/showdown/1.6.4/dist/showdown.min.js"
+></script>
+<script type="text/javascript" src="scripts.js"></script>
+<script type="text/javascript">
+<!--
+  $(setup);
+  -->
+</script>
+</head>
+<body>
+  <div id="wrapper">
+    <div id="form_wrapper">
+      <form>
+        <pre class="url">
+GET _render/template
+</pre>
+        <pre>
+{
+  "template": {
+    "lang":   "jsont",
+    "params": {
+</pre>
+        <textarea id="params" name="params" rows="1" cols="40">
+"person": {
+  "name": "john smith"
+}</textarea>
+        <pre>
+    },
+    "inline": {
+      "query": """
+</pre>
+        <textarea id="template" name="template" rows="1" cols="40">&lt;&lt; person.name &gt;&gt;</textarea>
+        <pre>
+      """
+    }
+  }
+}
+</pre>
+      </form>
+    </div>
+    <div id="output_wrapper">
+      <pre class="url">
+OUTPUT:
+</pre>
+      <pre id="output">
+</pre>
+    </div>
+  </div>
+  <div id="docs_wrapper">
+    <div id="docs"></div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,65 @@
+body {
+  width: 100%;
+}
+
+#wrapper,#docs_wrapper {
+  width: 50%;
+  float: left;
+}
+
+#output_wrapper,#form_wrapper {
+  border: 1px solid #ccc;
+  padding: 1em;
+}
+
+pre.url {
+  font-size: 1.5em;
+  margin: 0;
+}
+
+textarea,
+pre {
+  font-size: 1.2em;
+  margin: 0 0 0 0em;
+  font-family: monospace;
+}
+
+textarea {
+  font-size: 1.2em;
+  margin: 5px 0 5px 6em;
+  width: 35em;
+  font-family: monospace;
+  border: 1px green solid;
+  outline: none;
+}
+
+.error {
+  border: 1px red solid;
+}
+
+#docs {
+  margin: 1em;
+  font-family: Sans-serif;
+  font-size: 0.95em;
+  line-height: 1.4;
+}
+
+#docs a, #docs a:visited {
+  color: blue
+}
+
+#docs code {
+  color: #599044;
+  font-size: 1.2em;
+}
+
+#output {
+  color: blue;
+  border: none;
+  white-space: pre-wrap;
+}
+
+#output.error {
+  color: red;
+  border: none
+}

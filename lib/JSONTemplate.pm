@@ -84,7 +84,7 @@ sub _render {
     $self->_has_opaque(0);
     $self->_reset_offset;
     $self->_tokenize;
-    return $self->_execute;
+    return $self->_process_list;
 }
 
 my %Escape = (
@@ -173,96 +173,117 @@ sub render_text {
 }
 
 #===================================
-sub _execute {
+sub _process_list {
 #===================================
     my $self = shift;
 
-    my @output = @_;
+    my @vals;
 
-    while ( my $token = $self->_next_token ) {
+    while ( my $token = $self->_peek_next_token ) {
         my ( $type, $item ) = @$token;
 
         if ( $type eq 'OPAQUE' ) {
-            push @output, $item;
+            push @vals, $item;
             $self->_has_opaque(1);
+            $self->_next_token;
             next;
         }
 
-        if ( $type eq 'CLOSE_PAREN' || $type eq 'CLOSE_SECTION' ) {
-            $self->_replace_token($token);
-            return @output;
+        if ( $type =~ /^(VAL|VAR|OPEN_PAREN|OPEN_SECTION)$/ ) {
+            push @vals, $self->_process_expression;
+            next;
         }
 
-        my @vals
-            = $type eq 'VAL'          ? $item
-            : $type eq 'VAR'          ? $self->_lookup_var($item)
-            : $type eq 'OPEN_PAREN'   ? $self->_execute
-            : $type eq 'OPEN_SECTION' ? $self->_execute_section($item)
-            :                           die "Unknown token <$type>";
-
-        # drop CLOSE_PAREN/CLOSE_SECTION
-        if ($type eq 'OPEN_PAREN' || $type eq 'OPEN_SECTION') {
-            $self->_next_token;
+        if ( $type =~ /^(CLOSE_PAREN|CLOSE_SECTION)$/ ) {
+            last;
         }
 
-        @vals = $self->_apply_functions(@vals);
-
-        $token = $self->_peek_next_token;
-        if ( $token && $token->[0] eq 'CONCAT' ) {
-            $self->_next_token;
-            my @next = $self->_execute;
-            no warnings 'uninitialized';
-            if ( @vals == 1 && @next == 1 ) {
-                $vals[-1] = $vals[-1] . shift(@next);
-            }
-            else {
-                push @vals, @next;
-            }
-        }
-        push @output, @vals;
-
-    }
-
-    return @output;
-}
-
-#===================================
-sub _apply_functions {
-#===================================
-    my $self = shift;
-    my @vals = @_;
-
-    while ( my $token = $self->_peek_next_token ) {
-        last unless $token->[0] eq 'FUNC';
-        $token = $self->_next_token;
-        my $func = $Funcs{ $token->[1] }
-            or die "Unknown function name: " . $token->[1] . "\n";
-        my @params;
-        my $next = $self->_peek_next_token;
-        if ( $next && $next->[0] eq 'OPEN_PARAM' ) {
-            $self->_next_token;
-            while ( my $token = $self->_next_token ) {
-                last if $token->[0] eq 'CLOSE_PARAM';
-                if ( $token->[0] eq 'VAL' ) {
-                    push @params, $token->[1];
-                    next;
-                }
-
-                if ( $token->[0] eq 'VAR' ) {
-                    my $val = $self->_lookup_var( $token->[1] );
-                    push @params, $val;
-                    next;
-                }
-                die "Unknown token: " . $token->[0] . "\n";
-            }
-        }
-        @vals = $func->( \@params, @vals );
+        die "Unknown token type <$type>";
     }
     return @vals;
 }
 
 #===================================
-sub _execute_section {
+sub _process_expression {
+#===================================
+    my $self  = shift;
+    my $token = $self->_next_token;
+    my ( $type, $item ) = @$token;
+
+    my @vals
+        = $type eq 'VAL'          ? $item
+        : $type eq 'VAR'          ? $self->_lookup_var($item)
+        : $type eq 'OPEN_PAREN'   ? $self->_process_list
+        : $type eq 'OPEN_SECTION' ? $self->_process_section($item)
+        :   do { $self->_replace_token($token); return };
+
+    my $close
+        = $type eq 'OPEN_PAREN'   ? 'CLOSE_PAREN'
+        : $type eq 'OPEN_SECTION' ? 'CLOSE_SECTION'
+        :                           '';
+
+    if ($close) {
+        my $next_token = $self->_next_token;
+        my $got = $next_token && $next_token->[0] || '';
+        unless ( $got eq $close ) {
+            die "Expecting token <$close> but got <$got>";
+        }
+    }
+
+    while ( my $token = $self->_peek_next_token ) {
+        last unless $token->[0] eq 'FUNC';
+        $self->_next_token;
+        my ( $func, $params ) = $self->_get_func( $token->[1] );
+        @vals = $func->( $params, @vals );
+    }
+
+    while ( my $token = $self->_peek_next_token ) {
+        last unless $token->[0] eq 'CONCAT';
+        $self->_next_token;
+        my @next = $self->_process_expression();
+        no warnings 'uninitialized';
+        if ( @vals == 1 && @next == 1 ) {
+            $vals[-1] = $vals[-1] . shift(@next);
+        }
+        else {
+            push @vals, @next;
+        }
+    }
+    return @vals;
+}
+
+#===================================
+sub _get_func {
+#===================================
+    my $self = shift;
+    my $name = shift;
+    my $func = $Funcs{$name}
+        or die "Unknown function name: <$name>\n";
+
+    # no next token
+    my $token = $self->_next_token || return ( $func, [] );
+
+    # no param list
+    if ( $token->[0] ne 'OPEN_PARAM' ) {
+        $self->_replace_token($token);
+        return ( $func, [] );
+    }
+
+    # build param list
+    my @params;
+    while ( $token = $self->_next_token ) {
+        my ( $type, $item ) = @$token;
+        last if $type eq 'CLOSE_PARAM';
+        push @params,
+              $type eq 'VAL' ? $item
+            : $type eq 'VAR' ? $self->_lookup_var($item)
+            :                  die "Unknown token type <$type>\n";
+    }
+    return ( $func, \@params );
+}
+
+#===================================
+sub _process_section {
 #===================================
     my $self = shift;
     my $name = shift;
@@ -273,10 +294,10 @@ sub _execute_section {
 
     my @tokens;
     my $nested = 1;
-    while ( my $next = $self->_next_token ) {
+    while ( my $next = $self->_peek_next_token ) {
         last if $next->[0] eq 'CLOSE_SECTION' && 0 == --$nested;
         $nested++ if $next->[0] eq 'OPEN_SECTION';
-        push @tokens, $next;
+        push @tokens, $self->_next_token;
     }
 
     my $val = $self->_lookup_var($name);
@@ -297,7 +318,7 @@ sub _execute_section {
         }
     }
 
-    my @output;
+    my @vals;
     my $old_tokens = $self->_tokens;
     my $old_params = $self->_params;
 
@@ -311,11 +332,11 @@ sub _execute_section {
         }
 
         $self->_tokens( [@tokens] );
-        push @output, $self->_execute;
+        push @vals, $self->_process_list;
         $self->_params($old_params);
     }
     $self->_tokens($old_tokens);
-    return @output;
+    return @vals;
 }
 
 #===================================
@@ -476,16 +497,23 @@ sub _tokenize {
         $self->_unknown_token;
 
     }
-    if (@stack) {
-        my $missing
-            = $stack[-1] eq 'CODE'  ? '>>'
-            : $stack[-1] eq 'PARAM' ? ')'
-            :                         "UNHANDLED STACK ITEM";
-        my $input = $self->_original;
-        die "Missing closing $missing:\n$input \x{2B05}\n";
-    }
+    $self->_check_stack( pop @stack || '', '' );
 
 }
+
+my %Opening = (
+    CODE    => '<<',
+    PARAM   => '(',
+    PAREN   => '(',
+    SECTION => 'varname<'
+);
+
+my %Closing = (
+    CODE    => '>>',
+    PARAM   => ')',
+    PAREN   => ')',
+    SECTION => '>'
+);
 
 #===================================
 sub _check_stack {
@@ -494,25 +522,20 @@ sub _check_stack {
     my $expected = shift;
     my $got      = shift || '';
     return if $expected eq $got;
+
     my $msg;
-    if ( !$expected ) {
-        my $missing
-            = $got eq 'CODE'    ? '<<'
-            : $got eq 'PARAM'   ? '('
-            : $got eq 'PAREN'   ? '('
-            : $got eq 'SECTION' ? 'varname<'
-            :                     'Unknown stack item: $got';
-        $msg = "Found closing $got without opening $missing.";
+    if ($expected) {
+        my $op = $Closing{$expected};
+        if ($got) {
+            $msg = "Expected $op but found " . $Closing{$got};
+        }
+        else {
+            $msg = "Expected closing $op";
+        }
     }
     else {
-        my $expected_msg
-            = $expected eq 'CODE'    ? '>>'
-            : $expected eq 'PARAM'   ? ')'
-            : $expected eq 'PAREN'   ? ')'
-            : $expected eq 'SECTION' ? '>'
-            :                          "Unknown stack item: $expected";
-
-        $msg = "Got closing $got but was expecting $expected_msg. ";
+        my $op = $Closing{$got};
+        $msg = "Found closing $op without opening " . $Opening{$got};
     }
     die "$msg:\n"
         . substr( $self->_original, 0, $self->_get_offset )
