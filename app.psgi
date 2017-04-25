@@ -21,8 +21,7 @@ our $J    = JSONTemplate->new;
 builder {
     mount '/render' => \&render;
     enable "Plack::Middleware::DirIndex", dir_index => 'index.html';
-    mount '/' => Plack::App::File->new( root => "$FindBin::Bin/html/" )
-        ->to_app;
+    mount '/' => Plack::App::File->new( root => "$FindBin::Bin/html/" )->to_app;
 };
 
 #===================================
